@@ -1,21 +1,21 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { z } from 'zod';
-import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/hooks/use-toast';
-import { Mail, Lock, ArrowRight, Loader2, Eye, EyeOff, CheckCircle2, Building2 } from 'lucide-react';
+import { ArrowRight, Loader2, CheckCircle2, Building2, AlertCircle } from 'lucide-react';
 
 const RUC_STORAGE_KEY = 'remembered_ruc';
-const COMPANY_LOGO_KEY = 'company_logos'; // Cache for company logos
+const CURRENT_RUC_KEY = 'current_ruc';
+const COMPANY_LOGO_KEY = 'company_logos';
+const API_BASE_URL = 'http://localhost:3001/api';
+const TARGET_APP_URL = 'http://localhost:3000';
 
-// Helper to get initials from RUC (first 2 digits for now, could be company name later)
+// Helper to get initials from RUC
 const getCompanyInitials = (ruc: string): string => {
-  // You can customize this - for now uses first 2 chars
   return ruc.slice(0, 2).toUpperCase();
 };
 
@@ -43,27 +43,24 @@ const CompanyAvatar = ({ ruc, logoUrl }: { ruc: string; logoUrl?: string }) => {
 };
 
 const authSchema = z.object({
-  ruc: z.string().trim().min(11, { message: "El RUC debe tener 11 dígitos" }).max(11, { message: "El RUC debe tener 11 dígitos" }).regex(/^\d+$/, { message: "El RUC solo debe contener números" }),
-  email: z.string().trim().email({ message: "Ingresa un email válido" }).max(255),
-  password: z.string().min(6, { message: "La contraseña debe tener al menos 6 caracteres" }).max(100),
+  ruc: z.string()
+    .trim()
+    .min(11, { message: "El RUC debe tener 11 dígitos" })
+    .max(11, { message: "El RUC debe tener 11 dígitos" })
+    .regex(/^\d+$/, { message: "El RUC solo debe contener números" }),
 });
 
 const Auth = () => {
-  const [isLogin, setIsLogin] = useState(true);
   const [ruc, setRuc] = useState('');
   const [rememberRuc, setRememberRuc] = useState(false);
   const [companyLogo, setCompanyLogo] = useState<string | undefined>(undefined);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [errors, setErrors] = useState<{ ruc?: string; email?: string; password?: string }>({});
+  const [errors, setErrors] = useState<{ ruc?: string }>({});
+  const [availableRucs, setAvailableRucs] = useState<string[]>([]);
   
-  const { signIn, signUp, user, loading } = useAuth();
-  const navigate = useNavigate();
   const { toast } = useToast();
 
-  // Load remembered RUC and logo from localStorage
+  // Load remembered RUC
   useEffect(() => {
     const savedRuc = localStorage.getItem(RUC_STORAGE_KEY);
     if (savedRuc) {
@@ -77,20 +74,12 @@ const Auth = () => {
     }
   }, []);
 
-  useEffect(() => {
-    if (!loading && user) {
-      navigate('/', { replace: true });
-    }
-  }, [user, loading, navigate]);
-
   const validateForm = () => {
-    const result = authSchema.safeParse({ ruc, email, password });
+    const result = authSchema.safeParse({ ruc });
     if (!result.success) {
-      const fieldErrors: { ruc?: string; email?: string; password?: string } = {};
+      const fieldErrors: { ruc?: string } = {};
       result.error.errors.forEach((err) => {
         if (err.path[0] === 'ruc') fieldErrors.ruc = err.message;
-        if (err.path[0] === 'email') fieldErrors.email = err.message;
-        if (err.path[0] === 'password') fieldErrors.password = err.message;
       });
       setErrors(fieldErrors);
       return false;
@@ -99,12 +88,69 @@ const Auth = () => {
     return true;
   };
 
+  const validateRucWithAPI = async (rucValue: string): Promise<boolean> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/parametros-sistema`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'ruc': rucValue,
+        },
+      });
+
+      if (response.ok) {
+        return true;
+      }
+
+      if (response.status === 400) {
+        const errorData = await response.json();
+        
+        // Extraer RUCs permitidos del mensaje de error
+        const match = errorData.message?.match(/RUCs permitidos: ([\d, ]+)/);
+        if (match) {
+          const rucsPermitidos = match[1].split(', ').map((r: string) => r.trim());
+          setAvailableRucs(rucsPermitidos);
+        }
+
+        setErrors({ ruc: 'RUC no encontrado en el sistema' });
+        toast({
+          title: "RUC no válido",
+          description: errorData.message || "El RUC ingresado no está registrado en el sistema.",
+          variant: "destructive",
+        });
+        return false;
+      }
+
+      throw new Error('Error en la validación del RUC');
+    } catch (error) {
+      console.error('Error validando RUC:', error);
+      toast({
+        title: "Error de conexión",
+        description: "No se pudo conectar con el servidor. Verifica que la API esté corriendo en el puerto 3001.",
+        variant: "destructive",
+      });
+      return false;
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
     if (!validateForm()) return;
     
     setIsLoading(true);
+    setAvailableRucs([]);
+
+    // Validar RUC contra la API
+    const isValid = await validateRucWithAPI(ruc);
+
+    if (!isValid) {
+      setIsLoading(false);
+      return;
+    }
+
+    // RUC válido, guardar en localStorage
+    localStorage.setItem(CURRENT_RUC_KEY, ruc);
 
     // Handle RUC remember preference
     if (rememberRuc) {
@@ -113,47 +159,16 @@ const Auth = () => {
       localStorage.removeItem(RUC_STORAGE_KEY);
     }
 
-    try {
-      const { error } = isLogin 
-        ? await signIn(email, password)
-        : await signUp(email, password);
+    toast({
+      title: "¡Bienvenido!",
+      description: "RUC validado correctamente. Redirigiendo...",
+    });
 
-      if (error) {
-        let message = error.message;
-        if (error.message.includes('Invalid login credentials')) {
-          message = 'Credenciales inválidas. Verifica tu email y contraseña.';
-        } else if (error.message.includes('User already registered')) {
-          message = 'Este email ya está registrado. Intenta iniciar sesión.';
-        }
-        toast({
-          title: "Error",
-          description: message,
-          variant: "destructive",
-        });
-      } else if (!isLogin) {
-        toast({
-          title: "¡Cuenta creada!",
-          description: "Tu cuenta ha sido creada exitosamente.",
-        });
-      }
-    } catch (err) {
-      toast({
-        title: "Error",
-        description: "Ocurrió un error inesperado. Intenta de nuevo.",
-        variant: "destructive",
-      });
-    } finally {
-      setIsLoading(false);
-    }
+    // Redirigir a localhost:3000 con el RUC en la URL
+    setTimeout(() => {
+      window.location.href = `${TARGET_APP_URL}?ruc=${ruc}`;
+    }, 800);
   };
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 className="h-8 w-8 animate-spin text-primary" />
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen flex bg-background">
@@ -182,7 +197,7 @@ const Auth = () => {
             transition={{ duration: 0.6, delay: 0.4 }}
             className="mt-12 space-y-4"
           >
-            {['Seguridad avanzada', 'Experiencia fluida', 'Soporte 24/7'].map((feature, index) => (
+            {['Seguridad avanzada', 'Experiencia fluida', 'Soporte 24/7'].map((feature) => (
               <div key={feature} className="flex items-center gap-3">
                 <CheckCircle2 className="h-5 w-5" />
                 <span className="text-lg opacity-90">{feature}</span>
@@ -222,19 +237,17 @@ const Auth = () => {
               Bienvenido
             </h1>
             <p className="text-muted-foreground">
-              {isLogin ? 'Inicia sesión en tu cuenta' : 'Crea tu cuenta'}
+              Inicia sesión con tu RUC
             </p>
           </div>
 
           {/* Desktop header */}
           <div className="hidden lg:block mb-10">
             <h2 className="text-3xl font-semibold text-foreground mb-2">
-              {isLogin ? 'Iniciar Sesión' : 'Crear Cuenta'}
+              Iniciar Sesión
             </h2>
             <p className="text-muted-foreground">
-              {isLogin 
-                ? 'Ingresa tus credenciales para continuar' 
-                : 'Completa tus datos para registrarte'}
+              Ingresa tu RUC para continuar
             </p>
           </div>
 
@@ -272,7 +285,7 @@ const Auth = () => {
                 <Input
                   id="ruc"
                   type="text"
-                  placeholder="20123456789"
+                  placeholder="10004438804"
                   value={ruc}
                   onChange={(e) => setRuc(e.target.value.replace(/\D/g, '').slice(0, 11))}
                   className="pl-12"
@@ -296,76 +309,10 @@ const Auth = () => {
                     initial={{ opacity: 0, y: -5 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -5 }}
-                    className="text-sm text-destructive"
+                    className="text-sm text-destructive flex items-center gap-1"
                   >
+                    <AlertCircle className="h-4 w-4" />
                     {errors.ruc}
-                  </motion.p>
-                )}
-              </AnimatePresence>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="email" className="text-sm font-medium text-foreground">
-                Email
-              </Label>
-              <div className="relative">
-                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
-                <Input
-                  id="email"
-                  type="email"
-                  placeholder="tu@email.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="pl-12"
-                  disabled={isLoading}
-                />
-              </div>
-              <AnimatePresence>
-                {errors.email && (
-                  <motion.p
-                    initial={{ opacity: 0, y: -5 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -5 }}
-                    className="text-sm text-destructive"
-                  >
-                    {errors.email}
-                  </motion.p>
-                )}
-              </AnimatePresence>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="password" className="text-sm font-medium text-foreground">
-                Contraseña
-              </Label>
-              <div className="relative">
-                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
-                <Input
-                  id="password"
-                  type={showPassword ? 'text' : 'password'}
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="pl-12 pr-12"
-                  disabled={isLoading}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-4 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
-                </button>
-              </div>
-              <AnimatePresence>
-                {errors.password && (
-                  <motion.p
-                    initial={{ opacity: 0, y: -5 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -5 }}
-                    className="text-sm text-destructive"
-                  >
-                    {errors.password}
                   </motion.p>
                 )}
               </AnimatePresence>
@@ -382,26 +329,50 @@ const Auth = () => {
                 <Loader2 className="h-5 w-5 animate-spin" />
               ) : (
                 <>
-                  {isLogin ? 'Iniciar Sesión' : 'Crear Cuenta'}
+                  Iniciar Sesión
                   <ArrowRight className="h-5 w-5 group-hover:translate-x-1 transition-transform" />
                 </>
               )}
             </Button>
           </form>
 
-          <div className="mt-8 text-center">
-            <p className="text-muted-foreground">
-              {isLogin ? '¿No tienes una cuenta?' : '¿Ya tienes una cuenta?'}
-              <button
-                type="button"
-                onClick={() => {
-                  setIsLogin(!isLogin);
-                  setErrors({});
-                }}
-                className="ml-2 text-primary hover:text-primary-hover font-medium transition-colors"
+          {/* RUCs disponibles */}
+          <AnimatePresence>
+            {availableRucs.length > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="mt-6 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded-lg"
               >
-                {isLogin ? 'Regístrate' : 'Inicia Sesión'}
-              </button>
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-amber-900 dark:text-amber-100 mb-2">
+                      RUCs disponibles:
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {availableRucs.map((availableRuc) => (
+                        <button
+                          key={availableRuc}
+                          type="button"
+                          onClick={() => setRuc(availableRuc)}
+                          className="px-3 py-1 text-xs font-mono bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-700 rounded hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors"
+                        >
+                          {availableRuc}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Info de la API */}
+          <div className="mt-6 p-3 bg-muted/50 rounded-lg border border-border">
+            <p className="text-xs text-muted-foreground text-center">
+              Validando contra: <span className="font-mono">{API_BASE_URL}</span>
             </p>
           </div>
         </motion.div>
